@@ -1,0 +1,21 @@
+@"
+# Python
+__pycache__/
+*.py[cod]
+venv/
+
+# Dados temporários
+input/
+output/
+csv/
+*.tmp
+
+# Imagens/dados brutos
+*.tif
+*.png
+*.jpg
+
+# Ambiente
+.env
+*.log
+"@ | Out-File -Encoding utf8 .gitignore
