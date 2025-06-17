@@ -1,4 +1,3 @@
-@"
 # Python
 __pycache__/
 *.py[cod]
@@ -10,7 +9,7 @@ output/
 csv/
 *.tmp
 
-# Imagens/dados brutos
+# Imagens/dados brutos (exceto .jar)
 *.tif
 *.png
 *.jpg
@@ -18,4 +17,6 @@ csv/
 # Ambiente
 .env
 *.log
-"@ | Out-File -Encoding utf8 .gitignore
+
+# EXCEÇÃO: Arquivos .jar são importantes e DEVEM ser versionados
+!*.jar
