@@ -1,22 +1,22 @@
 # Python
 __pycache__/
 *.py[cod]
-venv/
+#venv/
 
 # Dados temporários
-input/
-output/
-csv/
-*.tmp
+#input/
+#output/
+#csv/
+#*.tmp
 
 # Imagens/dados brutos (exceto .jar)
-*.tif
-*.png
-*.jpg
+#*.tif
+#*.png
+#*.jpg
 
 # Ambiente
-.env
-*.log
+#.env
+#*.log
 
 # EXCEÇÃO: Arquivos .jar são importantes e DEVEM ser versionados
 !*.jar
