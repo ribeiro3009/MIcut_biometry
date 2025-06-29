@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-python fingerprint_cluster_check.py Digitais_Descompactadas --jar sourceafis-3.18.1.jar
+python fingerprint_cluster_check.py input/bmp --jar sourceafis-3.18.1.jar
 python fingerprint_cluster_check.py DB1_B --jar sourceafis-3.18.1.jar
 Batch fingerprint multiple-presence detector usando SourceAFIS e DBSCAN.
 Gera CSV com resultados e salva imagens com clusters se desejado.
@@ -19,15 +19,15 @@ from sklearn.cluster import DBSCAN
 
 _vm_started = False
 
-def start_jvm(jar_path):
+def start_jvm(jar_path="bin"):
     global _vm_started
     if not _vm_started:
-        jars = glob.glob("*.jar")
+        jars = glob.glob(os.path.join("bin", "*.jar"))  # agora: ./jar_files/*.jar
         jpype.startJVM(classpath=jars)
         _vm_started = True
 
-def extract_fingerprint_template(img, dpi, jar_path):
-    start_jvm(jar_path)
+def extract_fingerprint_template(img, dpi, bin):
+    start_jvm(bin)
     from com.machinezoo.sourceafis import FingerprintImage, FingerprintImageOptions, FingerprintTemplate
     pil_img = Image.fromarray(img)
     raw = pil_img.tobytes()

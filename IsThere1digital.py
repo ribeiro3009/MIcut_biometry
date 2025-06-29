@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-#python IsThere1digital.py bmp     --csv single.csv   --vis_out vis      --crop_out crops
+#python IsThere1digital.py input/bmp     --csv single.csv   --vis_out vis      --crop_out crops
 """
 Batch fingerprint single‑presence detector (com visualização) + crop.
 Novas funções:
 * Salva bbox principal (digital central) no CSV.
 * Salva recorte dessa bbox em `--crop_out`.
 Mantido fluxo original; apenas adições.
+python .\IsThere1digital.py input/bmp --csv single.csv --vis_out 
+vis --crop_out crops
 """
 import os
 import csv
@@ -149,8 +151,8 @@ def process_dir(inp: str,
         rows.append({
             'filename': fname,
             'single': single,
-            'groups': grp,
-            'solidity': round(sol,3),
+            #'groups': grp,
+            #solidity': round(sol,3),
             'bbox_x1': bbox[0], 'bbox_x2': bbox[1],
             'bbox_y1': bbox[2], 'bbox_y2': bbox[3]
         })
@@ -158,7 +160,11 @@ def process_dir(inp: str,
         write_metadata(fpath, single)
         cv2.imwrite(os.path.join(vis_dir, fname), vis)
         if crop is not None and crop.size:
-            cv2.imwrite(os.path.join(crop_dir, fname), crop)
+            crop_path = os.path.join(crop_dir, fname)
+
+            # converte BGR → RGB e grava com 500 dpi
+            pil_crop = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            pil_crop.save(crop_path, dpi=(500, 500))
 
         print(f"{fname}: {'1 dedo' if single else 'multi'} (grp={grp}, sol={sol:.2f})")
 
