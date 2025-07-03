@@ -35,7 +35,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="C:\Users\rj0369870548\Desktop\Projects_VsStudio\Recorte_Library\MIcut_biometric\venv"
+VIRTUAL_ENV="C:\Users\luizs\Área de Trabalho\Montreal\MIcut_biometry\venv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"

@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=C:\Users\rj0369870548\Desktop\Projects_VsStudio\Recorte_Library\MIcut_biometric\venv
+set VIRTUAL_ENV=C:\Users\luizs\Área de Trabalho\Montreal\MIcut_biometry\venv
 
 if not defined PROMPT set PROMPT=$P$G
 

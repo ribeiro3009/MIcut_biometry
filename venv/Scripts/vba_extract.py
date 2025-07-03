@@ -1,4 +1,4 @@
-#!C:\Users\rj0369870548\Desktop\Projects_VsStudio\Recorte_Library\MIcut_biometric\venv\Scripts\python.exe
+#!C:\Users\luizs\Área de Trabalho\Montreal\MIcut_biometry\venv\Scripts\python.exe
 
 ##############################################################################
 #
