@@ -12,18 +12,20 @@ from features.segmentation import segment_fingerprint
 from features.minutiae import analyze_minutiae_from_image
 from features.shape import analyze_shape
 from features.texture import analyze_texture
-from features.noise import analyze_background_noise
+from features.frequency import analyze_ridge_frequency
 
 # --- Configuration ---
 INPUT_DIR = "input/bmp"
 OUTPUT_DIR = "output"
 CROPS_DIR = os.path.join(OUTPUT_DIR, "crops")
+MASKS_DIR = os.path.join(OUTPUT_DIR, "masks")
 NFIQ2_RESULTS_CSV = os.path.join(OUTPUT_DIR, "nfiq_results.csv")
 FINAL_RESULTS_CSV = os.path.join(OUTPUT_DIR, "full_analysis.csv")
 NFIQ2_EXECUTABLE_PATH = os.path.abspath("bin/NFIQ2/bin/NFIQ2.exe")
 
 def setup_directories():
     os.makedirs(CROPS_DIR, exist_ok=True)
+    os.makedirs(MASKS_DIR, exist_ok=True)
     
 def save_crop_500dpi(arr: np.ndarray, dst: str) -> None:
     """
@@ -45,9 +47,12 @@ def run_stage_1_segmentation(image_paths):
                 filename = os.path.basename(path)
                 if segment_data.get("cropped_image") is not None:
                     crop_path = os.path.join(CROPS_DIR, filename)
-                    #cv2.imwrite(crop_path, segment_data["cropped_image"])
                     save_crop_500dpi(segment_data["cropped_image"], crop_path)
                 
+                if segment_data.get("mask") is not None:
+                    mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
+                    cv2.imwrite(mask_path, segment_data["mask"].astype(np.uint8) * 255)
+
                 results.append({
                     "filename": filename,
                     "is_single": segment_data["is_single"],
@@ -140,11 +145,9 @@ def analyze_python_features(crop_path):
         filename = os.path.basename(crop_path)
         original_path = os.path.join(INPUT_DIR, filename)
 
-        # 1) Re-executa a segmentação no original para obter a máscara
-        segment_data = segment_fingerprint(original_path)
-        roi_mask = None
-        if segment_data:
-            roi_mask = segment_data.get("mask")
+        # 1) Carrega a máscara de segmentação
+        mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
+        roi_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
         # 2) Carrega o crop em gray
         cropped_image = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
@@ -154,30 +157,21 @@ def analyze_python_features(crop_path):
         # 3) Minúcias
         minutiae_data = analyze_minutiae_from_image(crop_path)
 
-        # 4) Shape (mantém o seu threshold atual)
-        bin_mask = cv2.threshold(
-            cropped_image, 0, 255,
-            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-        )[1]
-        shape_data = analyze_shape(bin_mask)
+        # 4) Shape (usa a máscara de segmentação)
+        shape_data = analyze_shape(roi_mask)
 
         # 5) Texture, agora passando a máscara de ROI
         texture_data = analyze_texture(cropped_image, roi_mask)
 
-        # 6) Noise (igual de antes)
-        original_img_gray = cv2.imread(original_path, cv2.IMREAD_GRAYSCALE)
-        _, full_mask = cv2.threshold(
-            cv2.GaussianBlur(original_img_gray, (5, 5), 2),
-            0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-        )
-        noise_data = analyze_background_noise(full_mask)
+        # 6) Ridge Consistency
+        frequency_data = analyze_ridge_frequency(cropped_image, roi_mask)
 
         return {
             "filename": filename,
             **minutiae_data,
             **shape_data,
             **texture_data,
-            **noise_data
+            **frequency_data
         }
 
     except Exception as e:

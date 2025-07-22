@@ -15,8 +15,8 @@ venv/
 #*.jpg
 
 # Ambiente
-#.env
+.env
 #*.log
-
+key.env
 # EXCEÇÃO: Arquivos .jar são importantes e DEVEM ser versionados
 !*.jar
