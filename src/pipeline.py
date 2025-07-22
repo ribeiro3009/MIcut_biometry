@@ -13,7 +13,6 @@ from features.minutiae import analyze_minutiae_from_image
 from features.shape import analyze_shape
 from features.texture import analyze_texture
 from features.noise import analyze_background_noise
-from features.frequency import analyze_ridge_frequency
 
 # --- Configuration ---
 INPUT_DIR = "input/bmp"
@@ -52,13 +51,19 @@ def run_stage_1_segmentation(image_paths):
                 results.append({
                     "filename": filename,
                     "is_single": segment_data["is_single"],
-                    "box": str(segment_data["box"])
+                    "box_x1": segment_data["box"][0],
+                    "box_y1": segment_data["box"][1],
+                    "box_x2": segment_data["box"][2],
+                    "box_y2": segment_data["box"][3],
                 })
             else:
                 results.append({
                     "filename": os.path.basename(path), 
                     "is_single": False,
-                    "box": None
+                    "box_x1": None,
+                    "box_y1": None,
+                    "box_x2": None,
+                    "box_y2": None,
                 })
         except Exception as e:
             print(f"Error in Stage 1 for {os.path.basename(path)}: {e}")
@@ -129,31 +134,56 @@ def run_stage_2_nfiq2():
             
     return nfiq_df
 
-
 def analyze_python_features(crop_path):
     """Function to run all Python-based analyses for a single cropped image."""
     try:
         filename = os.path.basename(crop_path)
-        minutiae_data = analyze_minutiae_from_image(crop_path)
-        cropped_image = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
         original_path = os.path.join(INPUT_DIR, filename)
+
+        # 1) Re-executa a segmentação no original para obter a máscara
+        segment_data = segment_fingerprint(original_path)
+        roi_mask = None
+        if segment_data:
+            roi_mask = segment_data.get("mask")
+
+        # 2) Carrega o crop em gray
+        cropped_image = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
+        if cropped_image is None:
+            return {"filename": filename}
+
+        # 3) Minúcias
+        minutiae_data = analyze_minutiae_from_image(crop_path)
+
+        # 4) Shape (mantém o seu threshold atual)
+        bin_mask = cv2.threshold(
+            cropped_image, 0, 255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )[1]
+        shape_data = analyze_shape(bin_mask)
+
+        # 5) Texture, agora passando a máscara de ROI
+        texture_data = analyze_texture(cropped_image, roi_mask)
+
+        # 6) Noise (igual de antes)
         original_img_gray = cv2.imread(original_path, cv2.IMREAD_GRAYSCALE)
-        _, full_mask = cv2.threshold(cv2.GaussianBlur(original_img_gray, (5, 5), 2), 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        shape_data = analyze_shape(cv2.threshold(cropped_image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1])
-        texture_data = analyze_texture(cropped_image)
+        _, full_mask = cv2.threshold(
+            cv2.GaussianBlur(original_img_gray, (5, 5), 2),
+            0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
         noise_data = analyze_background_noise(full_mask)
-        frequency_data = analyze_ridge_frequency(cropped_image)
+
         return {
             "filename": filename,
             **minutiae_data,
             **shape_data,
             **texture_data,
-            **noise_data,
-            **frequency_data
+            **noise_data
         }
+
     except Exception as e:
-        print(f"Error in Python analysis for {os.path.basename(crop_path)}: {e}")
-        return {"filename": os.path.basename(crop_path)}
+        print(f"Error in Python analysis for {filename}: {e}")
+        return {"filename": filename}
+
 
 def run_stage_3_python_analysis():
     print("\n--- Stage 3: Running Python-based Feature Analysis (Sequential) ---")
