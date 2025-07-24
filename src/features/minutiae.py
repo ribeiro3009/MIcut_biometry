@@ -120,20 +120,18 @@ def detect_clusters_and_singularities(template_cbor, eps=50, min_samples=5, clus
 
 # --- Função de Integração com o Pipeline ---
 
-def analyze_minutiae_from_image(cropped_image_path):
+def analyze_minutiae_from_image(img_array: np.ndarray):
     """
     Função principal chamada pelo pipeline.
-    Analisa um único arquivo de imagem usando SourceAFIS via jpype.
+    Analisa um array de imagem usando SourceAFIS via jpype.
     """
     default_return = {"minutiae_count": 0, "singularities_count": 0, "cluster_count": 0}
     
     try:
-        img = cv2.imread(cropped_image_path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            # print(f"Não foi possível ler a imagem: {cropped_image_path}")
+        if img_array is None:
             return default_return
 
-        template_cbor = extract_fingerprint_template(img)
+        template_cbor = extract_fingerprint_template(img_array)
         analysis_results = detect_clusters_and_singularities(template_cbor)
         
         return analysis_results

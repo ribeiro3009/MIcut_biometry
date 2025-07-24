@@ -2,7 +2,8 @@ import os
 import glob
 import subprocess
 import polars as pl
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 import cv2
 from PIL import Image
 import numpy as np
@@ -37,47 +38,51 @@ def save_crop_500dpi(arr: np.ndarray, dst: str) -> None:
         pil_img = Image.fromarray(arr[:, :, ::-1], mode="RGB")
     pil_img.save(dst, format="BMP", dpi=(500, 500))
 
+def process_single_image_for_segmentation(path):
+    """Helper function for parallel execution of segmentation."""
+    try:
+        segment_data = segment_fingerprint(path)
+        if segment_data and segment_data.get("box") is not None:
+            filename = os.path.basename(path)
+            if segment_data.get("cropped_image") is not None:
+                crop_path = os.path.join(CROPS_DIR, filename)
+                save_crop_500dpi(segment_data["cropped_image"], crop_path)
+            
+            if segment_data.get("mask") is not None:
+                mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
+                cv2.imwrite(mask_path, (segment_data["mask"] > 0).astype(np.uint8) * 255)
+
+            return {
+                "filename": filename,
+                "is_single": segment_data["is_single"],
+                "box_x1": segment_data["box"][0],
+                "box_y1": segment_data["box"][1],
+                "box_x2": segment_data["box"][2],
+                "box_y2": segment_data["box"][3],
+            }
+        else:
+            return {
+                "filename": os.path.basename(path), "is_single": False, 
+                "box_x1": None, "box_y1": None, "box_x2": None, "box_y2": None,
+            }
+    except Exception as e:
+        print(f"Error processing {os.path.basename(path)} in Stage 1: {e}")
+        return None
+
 def run_stage_1_segmentation(image_paths):
-    print("--- Stage 1: Segmenting and Cropping Images (Sequential) ---")
+    print("--- Stage 1: Segmenting and Cropping Images (Parallel) ---")
     results = []
-    for i, path in enumerate(image_paths):
-        try:
-            segment_data = segment_fingerprint(path)
-            if segment_data:
-                filename = os.path.basename(path)
-                if segment_data.get("cropped_image") is not None:
-                    crop_path = os.path.join(CROPS_DIR, filename)
-                    save_crop_500dpi(segment_data["cropped_image"], crop_path)
-                
-                if segment_data.get("mask") is not None:
-                    mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
-                    cv2.imwrite(mask_path, segment_data["mask"].astype(np.uint8) * 255)
-
-                results.append({
-                    "filename": filename,
-                    "is_single": segment_data["is_single"],
-                    "box_x1": segment_data["box"][0],
-                    "box_y1": segment_data["box"][1],
-                    "box_x2": segment_data["box"][2],
-                    "box_y2": segment_data["box"][3],
-                })
-            else:
-                results.append({
-                    "filename": os.path.basename(path), 
-                    "is_single": False,
-                    "box_x1": None,
-                    "box_y1": None,
-                    "box_x2": None,
-                    "box_y2": None,
-                })
-        except Exception as e:
-            print(f"Error in Stage 1 for {os.path.basename(path)}: {e}")
-        print(f"Progress: {i+1}/{len(image_paths)} complete.")
-    return pl.DataFrame(results)
-
+    with ProcessPoolExecutor() as executor:
+        future_to_path = {executor.submit(process_single_image_for_segmentation, path): path for path in image_paths}
+        for future in tqdm(as_completed(future_to_path), total=len(image_paths), desc="Stage 1: Segmentation"):
+            result = future.result()
+            if result:
+                results.append(result)
+    
+    return pl.DataFrame([r for r in results if r])
 
 def run_stage_2_nfiq2():
-    print("\n--- Stage 2: Running NFIQ2 Analysis (using simplified logic) ---")
+    print("\n--- Stage 2: Running NFIQ2 Analysis ---")
     
     root_dir = os.getcwd()
     batch_file_path = os.path.join(root_dir, "nfiq2_batch.txt")
@@ -96,32 +101,23 @@ def run_stage_2_nfiq2():
         os.remove(temp_output_path)
 
     command = [
-        NFIQ2_EXECUTABLE_PATH,
-        "-f", batch_file_path,
-        "-o", temp_output_path,
-        "-j", str(min(os.cpu_count() * 2, 8)),
-        "-F"
+        NFIQ2_EXECUTABLE_PATH, "-f", batch_file_path, "-o", temp_output_path,
+        "-j", str(min(os.cpu_count() * 2, 8)), "-F"
     ]
     
-    print(f"Executing: {' '.join(command)}")
-    
+    print(f"Executing NFIQ2...")
     try:
         subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
         print("NFIQ2 analysis complete.")
     except subprocess.CalledProcessError as e:
         print(f"NFIQ2 execution failed: {e.stderr.decode(errors='ignore')}")
-        if os.path.exists(batch_file_path):
-            os.remove(batch_file_path)
+        if os.path.exists(batch_file_path): os.remove(batch_file_path)
         return pl.DataFrame()
 
-    if os.path.exists(batch_file_path):
-        os.remove(batch_file_path)
+    if os.path.exists(batch_file_path): os.remove(batch_file_path)
 
     if not os.path.exists(temp_output_path):
         print("NFIQ2 did not produce an output file.")
@@ -134,8 +130,7 @@ def run_stage_2_nfiq2():
             pl.col("filename").map_elements(lambda x: os.path.basename(x.strip('"')), return_dtype=pl.Utf8)
         )
     finally:
-        if os.path.exists(temp_output_path):
-            os.remove(temp_output_path)
+        if os.path.exists(temp_output_path): os.remove(temp_output_path)
             
     return nfiq_df
 
@@ -143,54 +138,37 @@ def analyze_python_features(crop_path):
     """Function to run all Python-based analyses for a single cropped image."""
     try:
         filename = os.path.basename(crop_path)
-        original_path = os.path.join(INPUT_DIR, filename)
-
-        # 1) Carrega a máscara de segmentação
+        
         mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
         roi_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
-        # 2) Carrega o crop em gray
         cropped_image = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
-        if cropped_image is None:
-            return {"filename": filename}
+        if cropped_image is None: return {"filename": filename}
 
-        # 3) Minúcias
-        minutiae_data = analyze_minutiae_from_image(crop_path)
-
-        # 4) Shape (usa a máscara de segmentação)
+        minutiae_data = analyze_minutiae_from_image(cropped_image)
         shape_data = analyze_shape(roi_mask)
-
-        # 5) Texture, agora passando a máscara de ROI
         texture_data = analyze_texture(cropped_image, roi_mask)
-
-        # 6) Ridge Consistency
         frequency_data = analyze_ridge_frequency(cropped_image, roi_mask)
 
-        return {
-            "filename": filename,
-            **minutiae_data,
-            **shape_data,
-            **texture_data,
-            **frequency_data
-        }
-
+        return {"filename": filename, **minutiae_data, **shape_data, **texture_data, **frequency_data}
     except Exception as e:
-        print(f"Error in Python analysis for {filename}: {e}")
-        return {"filename": filename}
-
+        print(f"Error in Python analysis for {os.path.basename(crop_path)}: {e}")
+        return {"filename": os.path.basename(crop_path), "error": str(e)}
 
 def run_stage_3_python_analysis():
-    print("\n--- Stage 3: Running Python-based Feature Analysis (Sequential) ---")
+    print("--- Stage 3: Running Python-based Feature Analysis (Parallel) ---")
     crop_paths = glob.glob(os.path.join(CROPS_DIR, "*.bmp"))
+    if not crop_paths:
+        print("No cropped images found for Python analysis.")
+        return pl.DataFrame()
     results = []
-    for i, path in enumerate(crop_paths):
-        try:
-            result = analyze_python_features(path)
-            results.append(result)
-        except Exception as e:
-            print(f"Critical error in Stage 3 for {os.path.basename(path)}: {e}")
-        print(f"Progress: {i+1}/{len(crop_paths)} complete.")
-    return pl.DataFrame(results)
+    with ProcessPoolExecutor() as executor:
+        future_to_path = {executor.submit(analyze_python_features, path): path for path in crop_paths}
+        for future in tqdm(as_completed(future_to_path), total=len(crop_paths), desc="Stage 3: Python Analysis"):
+            result = future.result()
+            if result:
+                results.append(result)
+    return pl.DataFrame([r for r in results if r])
 
 def main():
     setup_directories()
@@ -198,18 +176,25 @@ def main():
     if not image_paths:
         print(f"No BMP images found in {INPUT_DIR}. Exiting.")
         return
+
     main_df = run_stage_1_segmentation(image_paths)
-    if main_df.height == 0:
-        print("No single fingerprints found. Exiting.")
+    if main_df.filter(pl.col("box_x1").is_not_null()).height == 0:
+        print("Stage 1 did not produce any valid segmentations. Exiting.")
         return
+
+    print("\n--- Running Stage 2 (NFIQ2) and Stage 3 (Python Analysis) sequentially ---")
+    
     nfiq_df = run_stage_2_nfiq2()
     python_features_df = run_stage_3_python_analysis()
+
     print("\n--- Stage 4: Consolidating all results ---")
+    
     final_df = main_df.join(nfiq_df, on="filename", how="left")
-    final_df = final_df.join(python_features_df, on="filename", how="left")
+    if python_features_df.height > 0:
+        final_df = final_df.join(python_features_df, on="filename", how="left")
+    
     final_df.write_csv(FINAL_RESULTS_CSV)
-    print(f"\nProcessing complete. Final results saved to {FINAL_RESULTS_CSV}")
+    print(f"Processing complete. Final results saved to {FINAL_RESULTS_CSV}")
 
 if __name__ == "__main__":
     main()
-    
