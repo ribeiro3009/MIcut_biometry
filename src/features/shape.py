@@ -20,9 +20,6 @@ def analyze_shape(mask):
     # 1) Validação de entrada e conversão única de tipo
     if mask is None:
         return default_return
-    if mask.dtype != np.uint8:
-        # Garante uint8 binário (0 ou 1) só uma vez
-        mask = (mask > 0).astype(np.uint8)
     if not mask.any():
         return default_return
 

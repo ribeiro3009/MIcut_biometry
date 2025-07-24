@@ -45,7 +45,7 @@ def analyze_ridge_frequency(cropped_image, roi_mask=None, block_size=32, k=50.0)
                 
                 if roi_mask is not None:
                     roi_block = roi_mask[r:r+block_size, c:c+block_size]
-                    if np.mean(roi_block) < 255 * 0.25: # Analyze only if >25% is fingerprint
+                    if np.mean(roi_block) < 0.25: # Analyze only if >25% is fingerprint
                         continue
 
                 block = cropped_image[r:r+block_size, c:c+block_size]

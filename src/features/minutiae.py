@@ -11,23 +11,20 @@ from sklearn.cluster import DBSCAN
 # --- Gerenciamento da JVM ---
 _vm_started = False
 
-def start_jvm():
-    """Inicia a JVM do JPype se ainda não estiver ativa."""
+def start_jvm(jars_to_load: list[str]):
+    """Inicia a JVM do JPype se ainda não estiver ativa, usando os JARs fornecidos."""
     global _vm_started
     if not _vm_started:
-        # O caminho para os JARs é relativo à raiz do projeto
-        jar_path = os.path.abspath("bin")
-        jars = glob.glob(os.path.join(jar_path, "*.jar"))
-        if not jars:
-            raise RuntimeError("Nenhum arquivo JAR encontrado em 'bin/'. Garanta que o SourceAFIS está lá.")
-        jpype.startJVM(classpath=jars)
+        if not jars_to_load:
+            raise RuntimeError("Nenhum arquivo JAR fornecido para iniciar a JVM.")
+        jpype.startJVM(classpath=jars_to_load)
         _vm_started = True
 
 # --- Lógica Central (adaptada de fingerprint_cluster_check.py) ---
 
 def extract_fingerprint_template(img, dpi=500):
     """Extrai o template da digital usando SourceAFIS."""
-    start_jvm()
+
     from com.machinezoo.sourceafis import FingerprintImage, FingerprintImageOptions, FingerprintTemplate
 
     # Garante que a imagem está em escala de cinza

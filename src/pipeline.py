@@ -7,10 +7,11 @@ from tqdm import tqdm
 import cv2
 from PIL import Image
 import numpy as np
+from functools import partial
 
 # Import feature analysis functions
 from features.segmentation import segment_fingerprint
-from features.minutiae import analyze_minutiae_from_image
+from features.minutiae import analyze_minutiae_from_image, start_jvm
 from features.shape import analyze_shape
 from features.texture import analyze_texture
 from features.frequency import analyze_ridge_frequency
@@ -41,7 +42,11 @@ def save_crop_500dpi(arr: np.ndarray, dst: str) -> None:
 def process_single_image_for_segmentation(path):
     """Helper function for parallel execution of segmentation."""
     try:
-        segment_data = segment_fingerprint(path)
+        orig_bgr = cv2.imread(path)
+        if orig_bgr is None:
+            print(f"Error: Could not read image {os.path.basename(path)}")
+            return None
+        segment_data = segment_fingerprint(orig_bgr)
         if segment_data and segment_data.get("box") is not None:
             filename = os.path.basename(path)
             if segment_data.get("cropped_image") is not None:
@@ -50,7 +55,7 @@ def process_single_image_for_segmentation(path):
             
             if segment_data.get("mask") is not None:
                 mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
-                cv2.imwrite(mask_path, (segment_data["mask"] > 0).astype(np.uint8) * 255)
+                cv2.imwrite(mask_path, segment_data["mask"].astype(np.uint8))
 
             return {
                 "filename": filename,
@@ -72,7 +77,7 @@ def process_single_image_for_segmentation(path):
 def run_stage_1_segmentation(image_paths):
     print("--- Stage 1: Segmenting and Cropping Images (Parallel) ---")
     results = []
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=min(os.cpu_count() // 2, 4)) as executor:
         future_to_path = {executor.submit(process_single_image_for_segmentation, path): path for path in image_paths}
         for future in tqdm(as_completed(future_to_path), total=len(image_paths), desc="Stage 1: Segmentation"):
             result = future.result()
@@ -81,7 +86,7 @@ def run_stage_1_segmentation(image_paths):
     
     return pl.DataFrame([r for r in results if r])
 
-def run_stage_2_nfiq2():
+def run_stage_2_nfiq2(crop_files: list[str]):
     print("\n--- Stage 2: Running NFIQ2 Analysis ---")
     
     root_dir = os.getcwd()
@@ -141,6 +146,8 @@ def analyze_python_features(crop_path):
         
         mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
         roi_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if roi_mask is not None: # Garante que a máscara é binária (0 ou 1)
+            roi_mask = (roi_mask > 0).astype(np.uint8)
 
         cropped_image = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
         if cropped_image is None: return {"filename": filename}
@@ -155,14 +162,13 @@ def analyze_python_features(crop_path):
         print(f"Error in Python analysis for {os.path.basename(crop_path)}: {e}")
         return {"filename": os.path.basename(crop_path), "error": str(e)}
 
-def run_stage_3_python_analysis():
+def run_stage_3_python_analysis(crop_paths: list[str], jvm_jars: list[str]):
     print("--- Stage 3: Running Python-based Feature Analysis (Parallel) ---")
-    crop_paths = glob.glob(os.path.join(CROPS_DIR, "*.bmp"))
     if not crop_paths:
         print("No cropped images found for Python analysis.")
         return pl.DataFrame()
     results = []
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=min(os.cpu_count() // 2, 4), initializer=partial(start_jvm, jvm_jars)) as executor:
         future_to_path = {executor.submit(analyze_python_features, path): path for path in crop_paths}
         for future in tqdm(as_completed(future_to_path), total=len(crop_paths), desc="Stage 3: Python Analysis"):
             result = future.result()
@@ -184,8 +190,16 @@ def main():
 
     print("\n--- Running Stage 2 (NFIQ2) and Stage 3 (Python Analysis) sequentially ---")
     
-    nfiq_df = run_stage_2_nfiq2()
-    python_features_df = run_stage_3_python_analysis()
+    cropped_image_paths = [os.path.join(CROPS_DIR, f) for f in main_df.select("filename").to_series().to_list()]
+
+    jar_path = os.path.abspath("bin")
+    jvm_jars = glob.glob(os.path.join(jar_path, "*.jar"))
+    if not jvm_jars:
+        print("Nenhum arquivo JAR encontrado em 'bin/'. Garanta que o SourceAFIS está lá. Exiting.")
+        return
+
+    nfiq_df = run_stage_2_nfiq2(cropped_image_paths)
+    python_features_df = run_stage_3_python_analysis(cropped_image_paths, jvm_jars)
 
     print("\n--- Stage 4: Consolidating all results ---")
     

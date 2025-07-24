@@ -1,9 +1,8 @@
 import cv2
 import numpy as np
 
-def remove_lines_keep_fingerprints(image_path):
+def remove_lines_keep_fingerprints(img: np.ndarray):
     """Remove linhas verticais/horizontais mantendo as cristas das digitais."""
-    img = cv2.imread(image_path)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     # Binarização adaptativa
@@ -36,7 +35,7 @@ def remove_lines_keep_fingerprints(image_path):
 
 
 def segment_fingerprint(
-    image_path: str,
+    orig_bgr: np.ndarray,
     min_area_ratio: float    = 0.02,
     solidity_thresh: float   = 0.85,
     overlap_thresh: float    = 0.5,
@@ -51,8 +50,7 @@ def segment_fingerprint(
     """
     try:
         # 1) Segmentação inicial: linhas removidas, só cristas
-        mask = remove_lines_keep_fingerprints(image_path)
-        orig_bgr = cv2.imread(image_path)
+        mask = remove_lines_keep_fingerprints(orig_bgr)
         if mask is None or orig_bgr is None:
             return None
 
