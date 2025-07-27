@@ -55,7 +55,9 @@ def process_single_image_for_segmentation(path):
             
             if segment_data.get("mask") is not None:
                 mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
-                cv2.imwrite(mask_path, segment_data["mask"].astype(np.uint8))
+                # Convert boolean mask to uint8 (0 and 255) for visual clarity
+                visual_mask = (segment_data["mask"].astype(np.uint8)) * 255
+                cv2.imwrite(mask_path, visual_mask)
 
             return {
                 "filename": filename,
@@ -129,7 +131,11 @@ def run_stage_2_nfiq2(crop_files: list[str]):
         return pl.DataFrame()
 
     try:
-        nfiq_df = pl.read_csv(temp_output_path, encoding='latin-1').rename({"Filename": "filename", "QualityScore": "NFIQ2"})
+        nfiq_df = pl.read_csv(
+            temp_output_path,
+            encoding='latin-1',
+            null_values=["NA"]
+        ).rename({"Filename": "filename", "QualityScore": "NFIQ2"})
         nfiq_df = nfiq_df.select(["filename", "NFIQ2"])
         nfiq_df = nfiq_df.with_columns(
             pl.col("filename").map_elements(lambda x: os.path.basename(x.strip('"')), return_dtype=pl.Utf8)
@@ -183,27 +189,48 @@ def main():
         print(f"No BMP images found in {INPUT_DIR}. Exiting.")
         return
 
+    # Stage 1: Get segmentation results for all images
     main_df = run_stage_1_segmentation(image_paths)
-    if main_df.filter(pl.col("box_x1").is_not_null()).height == 0:
-        print("Stage 1 did not produce any valid segmentations. Exiting.")
-        return
 
-    print("\n--- Running Stage 2 (NFIQ2) and Stage 3 (Python Analysis) sequentially ---")
-    
-    cropped_image_paths = [os.path.join(CROPS_DIR, f) for f in main_df.select("filename").to_series().to_list()]
+    # Identify which images were segmented successfully
+    success_df = main_df.filter(pl.col("box_x1").is_not_null())
 
-    jar_path = os.path.abspath("bin")
-    jvm_jars = glob.glob(os.path.join(jar_path, "*.jar"))
-    if not jvm_jars:
-        print("Nenhum arquivo JAR encontrado em 'bin/'. Garanta que o SourceAFIS está lá. Exiting.")
-        return
+    # Initialize dataframes for analysis results
+    nfiq_df = pl.DataFrame()
+    python_features_df = pl.DataFrame()
 
-    nfiq_df = run_stage_2_nfiq2(cropped_image_paths)
-    python_features_df = run_stage_3_python_analysis(cropped_image_paths, jvm_jars)
+    # Run analysis only if there are successful segmentations
+    if success_df.height > 0:
+        print(f"\n--- Analyzing {success_df.height} successfully segmented images ---")
+        
+        cropped_image_paths = [
+            os.path.join(CROPS_DIR, f) 
+            for f in success_df.select("filename").to_series().to_list()
+        ]
 
+        jar_path = os.path.abspath("bin")
+        jvm_jars = glob.glob(os.path.join(jar_path, "*.jar"))
+        if not jvm_jars:
+            print("Nenhum arquivo JAR encontrado em 'bin/'. Garanta que o SourceAFIS está lá. Exiting.")
+            # We can still proceed to save the segmentation results
+        else:
+            # Stages 2 & 3 on successful crops only
+            nfiq_df = run_stage_2_nfiq2(cropped_image_paths)
+            python_features_df = run_stage_3_python_analysis(cropped_image_paths, jvm_jars)
+    else:
+        print("\nNo images were successfully segmented. Skipping analysis stages.")
+
+    # Stage 4: Consolidate all results
     print("\n--- Stage 4: Consolidating all results ---")
     
-    final_df = main_df.join(nfiq_df, on="filename", how="left")
+    # Start with the full dataframe from stage 1
+    final_df = main_df
+    
+    # Join NFIQ2 results. Nulls will be created for failures.
+    if nfiq_df.height > 0:
+        final_df = final_df.join(nfiq_df, on="filename", how="left")
+        
+    # Join Python features results. Nulls will be created for failures.
     if python_features_df.height > 0:
         final_df = final_df.join(python_features_df, on="filename", how="left")
     
