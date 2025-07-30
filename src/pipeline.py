@@ -2,7 +2,7 @@ import os
 import glob
 import subprocess
 import polars as pl
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import cv2
 from PIL import Image
@@ -10,83 +10,46 @@ import numpy as np
 from functools import partial
 
 # Import feature analysis functions
-from features.segmentation import segment_fingerprint
+from features.ml_segmentation import create_columns_from_cuts, segment_columns_with_ml
 from features.minutiae import analyze_minutiae_from_image, start_jvm
 from features.shape import analyze_shape
 from features.texture import analyze_texture
 from features.frequency import analyze_ridge_frequency
 
 # --- Configuration ---
-INPUT_DIR = "input/bmp"
-OUTPUT_DIR = "output"
+# Build paths relative to the project root to make the script runnable from anywhere
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+INPUT_DIR_CUTS = os.path.join(PROJECT_ROOT, "data/input/Ml_Sample")
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data/output")
+COLUMN_DIR = os.path.join(OUTPUT_DIR, "merged_columns_from_pipeline")
 CROPS_DIR = os.path.join(OUTPUT_DIR, "crops")
 MASKS_DIR = os.path.join(OUTPUT_DIR, "masks")
-NFIQ2_RESULTS_CSV = os.path.join(OUTPUT_DIR, "nfiq_results.csv")
+MODEL_PATH = os.path.join(PROJECT_ROOT, "bin/best_detector_model_v2.pth")
+NFIQ2_EXECUTABLE_PATH = os.path.join(PROJECT_ROOT, "bin/NFIQ2/bin/NFIQ2.exe")
 FINAL_RESULTS_CSV = os.path.join(OUTPUT_DIR, "full_analysis.csv")
-NFIQ2_EXECUTABLE_PATH = os.path.abspath("bin/NFIQ2/bin/NFIQ2.exe")
 
+# --- Utility Functions ---
 def setup_directories():
     os.makedirs(CROPS_DIR, exist_ok=True)
     os.makedirs(MASKS_DIR, exist_ok=True)
+    os.makedirs(COLUMN_DIR, exist_ok=True)
+
+# --- Pipeline Stages ---
+def run_stage_1_ml_segmentation(input_dir, column_dir, model_path, crops_dir, masks_dir):
+    print("--- Stage 1: Creating Columns and Segmenting with ML Model ---")
     
-def save_crop_500dpi(arr: np.ndarray, dst: str) -> None:
-    """
-    Grava o array OpenCV BGR/Gray como BMP com metadado 500 dpi.
-    """
-    if arr.ndim == 2:                   # gray
-        pil_img = Image.fromarray(arr, mode="L")
-    else:                               # BGR → RGB
-        pil_img = Image.fromarray(arr[:, :, ::-1], mode="RGB")
-    pil_img.save(dst, format="BMP", dpi=(500, 500))
+    # Part 1: Create column images from individual cuts
+    print(f"Creating column images from cuts in '{input_dir}'...")
+    column_paths = create_columns_from_cuts(input_dir, column_dir)
+    if not column_paths:
+        print("No columns were created. Aborting Stage 1.")
+        return pl.DataFrame()
+    print(f"Successfully created {len(column_paths)} column images.")
 
-def process_single_image_for_segmentation(path):
-    """Helper function for parallel execution of segmentation."""
-    try:
-        orig_bgr = cv2.imread(path)
-        if orig_bgr is None:
-            print(f"Error: Could not read image {os.path.basename(path)}")
-            return None
-        segment_data = segment_fingerprint(orig_bgr)
-        if segment_data and segment_data.get("box") is not None:
-            filename = os.path.basename(path)
-            if segment_data.get("cropped_image") is not None:
-                crop_path = os.path.join(CROPS_DIR, filename)
-                save_crop_500dpi(segment_data["cropped_image"], crop_path)
-            
-            if segment_data.get("mask") is not None:
-                mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
-                # Convert boolean mask to uint8 (0 and 255) for visual clarity
-                visual_mask = (segment_data["mask"].astype(np.uint8)) * 255
-                cv2.imwrite(mask_path, visual_mask)
-
-            return {
-                "filename": filename,
-                "is_single": segment_data["is_single"],
-                "box_x1": segment_data["box"][0],
-                "box_y1": segment_data["box"][1],
-                "box_x2": segment_data["box"][2],
-                "box_y2": segment_data["box"][3],
-            }
-        else:
-            return {
-                "filename": os.path.basename(path), "is_single": False, 
-                "box_x1": None, "box_y1": None, "box_x2": None, "box_y2": None,
-            }
-    except Exception as e:
-        print(f"Error processing {os.path.basename(path)} in Stage 1: {e}")
-        return None
-
-def run_stage_1_segmentation(image_paths):
-    print("--- Stage 1: Segmenting and Cropping Images (Parallel) ---")
-    results = []
-    with ProcessPoolExecutor(max_workers=min(os.cpu_count() // 2, 4)) as executor:
-        future_to_path = {executor.submit(process_single_image_for_segmentation, path): path for path in image_paths}
-        for future in tqdm(as_completed(future_to_path), total=len(image_paths), desc="Stage 1: Segmentation"):
-            result = future.result()
-            if result:
-                results.append(result)
-    
-    return pl.DataFrame([r for r in results if r])
+    # Part 2: Run ML model prediction on the columns
+    return segment_columns_with_ml(column_paths, model_path, crops_dir, masks_dir)
 
 def run_stage_2_nfiq2(crop_files: list[str]):
     print("\n--- Stage 2: Running NFIQ2 Analysis ---")
@@ -95,7 +58,6 @@ def run_stage_2_nfiq2(crop_files: list[str]):
     batch_file_path = os.path.join(root_dir, "nfiq2_batch.txt")
     temp_output_path = os.path.join(root_dir, "nfiq2_output.csv")
     
-    crop_files = glob.glob(os.path.join(CROPS_DIR, "*.bmp"))
     if not crop_files:
         print("No cropped images found to analyze with NFIQ2.")
         return pl.DataFrame()
@@ -120,7 +82,7 @@ def run_stage_2_nfiq2(crop_files: list[str]):
         )
         print("NFIQ2 analysis complete.")
     except subprocess.CalledProcessError as e:
-        print(f"NFIQ2 execution failed: {e.stderr.decode(errors='ignore')}")
+        print(f"NFIQ2 execution failed: {e.stderr.decode(errors='ignore') if e.stderr else 'Unknown error'}")
         if os.path.exists(batch_file_path): os.remove(batch_file_path)
         return pl.DataFrame()
 
@@ -145,17 +107,27 @@ def run_stage_2_nfiq2(crop_files: list[str]):
             
     return nfiq_df
 
+def _imread_unicode(path, flags):
+    """cv2.imread wrapper for unicode paths."""
+    try:
+        with open(path, 'rb') as f:
+            img_np = np.frombuffer(f.read(), np.uint8)
+        img = cv2.imdecode(img_np, flags)
+        return img
+    except (IOError, FileNotFoundError):
+        # This mimics cv2.imread behavior of returning None on failure
+        return None
+
 def analyze_python_features(crop_path):
-    """Function to run all Python-based analyses for a single cropped image."""
     try:
         filename = os.path.basename(crop_path)
         
         mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
-        roi_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if roi_mask is not None: # Garante que a máscara é binária (0 ou 1)
+        roi_mask = _imread_unicode(mask_path, cv2.IMREAD_GRAYSCALE)
+        if roi_mask is not None:
             roi_mask = (roi_mask > 0).astype(np.uint8)
 
-        cropped_image = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
+        cropped_image = _imread_unicode(crop_path, cv2.IMREAD_GRAYSCALE)
         if cropped_image is None: return {"filename": filename}
 
         minutiae_data = analyze_minutiae_from_image(cropped_image)
@@ -174,7 +146,8 @@ def run_stage_3_python_analysis(crop_paths: list[str], jvm_jars: list[str]):
         print("No cropped images found for Python analysis.")
         return pl.DataFrame()
     results = []
-    with ProcessPoolExecutor(max_workers=min(os.cpu_count() // 2, 4), initializer=partial(start_jvm, jvm_jars)) as executor:
+    max_workers = min(os.cpu_count(), 4)
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=partial(start_jvm, jvm_jars)) as executor:
         future_to_path = {executor.submit(analyze_python_features, path): path for path in crop_paths}
         for future in tqdm(as_completed(future_to_path), total=len(crop_paths), desc="Stage 3: Python Analysis"):
             result = future.result()
@@ -184,54 +157,42 @@ def run_stage_3_python_analysis(crop_paths: list[str], jvm_jars: list[str]):
 
 def main():
     setup_directories()
-    image_paths = glob.glob(os.path.join(INPUT_DIR, "*.bmp"))
-    if not image_paths:
-        print(f"No BMP images found in {INPUT_DIR}. Exiting.")
+    
+    main_df = run_stage_1_ml_segmentation(INPUT_DIR_CUTS, COLUMN_DIR, MODEL_PATH, CROPS_DIR, MASKS_DIR)
+
+    if main_df.is_empty():
+        print("No fingerprints were segmented by the ML model. Exiting.")
         return
 
-    # Stage 1: Get segmentation results for all images
-    main_df = run_stage_1_segmentation(image_paths)
+    print(f"\n--- Analyzing {main_df.height} successfully segmented fingerprints ---")
+    
+    cropped_image_paths = [
+        os.path.join(CROPS_DIR, f) 
+        for f in main_df.select("filename").to_series().to_list()
+    ]
 
-    # Identify which images were segmented successfully
-    success_df = main_df.filter(pl.col("box_x1").is_not_null())
-
+    jar_path = os.path.join(PROJECT_ROOT, "bin")
+    jvm_jars = glob.glob(os.path.join(jar_path, "*.jar"))
     # Initialize dataframes for analysis results
     nfiq_df = pl.DataFrame()
     python_features_df = pl.DataFrame()
 
-    # Run analysis only if there are successful segmentations
-    if success_df.height > 0:
-        print(f"\n--- Analyzing {success_df.height} successfully segmented images ---")
-        
-        cropped_image_paths = [
-            os.path.join(CROPS_DIR, f) 
-            for f in success_df.select("filename").to_series().to_list()
-        ]
-
-        jar_path = os.path.abspath("bin")
-        jvm_jars = glob.glob(os.path.join(jar_path, "*.jar"))
-        if not jvm_jars:
-            print("Nenhum arquivo JAR encontrado em 'bin/'. Garanta que o SourceAFIS está lá. Exiting.")
-            # We can still proceed to save the segmentation results
-        else:
-            # Stages 2 & 3 on successful crops only
-            nfiq_df = run_stage_2_nfiq2(cropped_image_paths)
-            python_features_df = run_stage_3_python_analysis(cropped_image_paths, jvm_jars)
+    if not jvm_jars:
+        print("Warning: No JAR files found in 'bin/'. Skipping Minutiae analysis.")
+        # nfiq_df is already an empty df
+        python_features_df = pl.DataFrame() # Ensure it's an empty df
     else:
-        print("\nNo images were successfully segmented. Skipping analysis stages.")
+        nfiq_df = run_stage_2_nfiq2(cropped_image_paths)
+        python_features_df = run_stage_3_python_analysis(cropped_image_paths, jvm_jars)
 
-    # Stage 4: Consolidate all results
     print("\n--- Stage 4: Consolidating all results ---")
     
-    # Start with the full dataframe from stage 1
     final_df = main_df
     
-    # Join NFIQ2 results. Nulls will be created for failures.
-    if nfiq_df.height > 0:
+    if not nfiq_df.is_empty():
         final_df = final_df.join(nfiq_df, on="filename", how="left")
         
-    # Join Python features results. Nulls will be created for failures.
-    if python_features_df.height > 0:
+    if not python_features_df.is_empty():
         final_df = final_df.join(python_features_df, on="filename", how="left")
     
     final_df.write_csv(FINAL_RESULTS_CSV)
