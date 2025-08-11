@@ -83,7 +83,6 @@ def process_and_save_hand(img_id, hand_paths, hand_name, output_dir):
     return output_path
 
 def segment_columns_with_ml(column_paths, model_path, crops_dir, masks_dir, batch_size=4, threshold=0.8):
-    # --- Imports moved inside the function to prevent initialization issues ---
     import torch
     import torchvision.transforms.functional as F
     from torchvision.models.detection import fasterrcnn_resnet50_fpn
@@ -91,6 +90,7 @@ def segment_columns_with_ml(column_paths, model_path, crops_dir, masks_dir, batc
     import numpy as np
     import polars as pl
     from tqdm import tqdm
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # --- Utility Functions (nested or local) ---
     def get_model(num_classes):
@@ -111,8 +111,6 @@ def segment_columns_with_ml(column_paths, model_path, crops_dir, masks_dir, batc
             pil_img = Image.fromarray(arr[:, :, ::-1], mode="RGB")
         pil_img.save(dst, format="BMP", dpi=(500, 500))
 
-    
-
     def _imwrite_unicode(path, img):
         """cv2.imwrite wrapper for unicode paths."""
         try:
@@ -127,39 +125,46 @@ def segment_columns_with_ml(column_paths, model_path, crops_dir, masks_dir, batc
 
     def remove_lines_keep_fingerprints(img: np.ndarray):
         """Remove linhas verticais/horizontais mantendo as cristas das digitais."""
-        # img já deve ser grayscale aqui
         if len(img.shape) == 3:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:
             gray = img
-
-        # Binarização adaptativa
-        thresh = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV,
-            21, 9
-        )
-
-        # Kernels para linhas
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 9)
         vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
         horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
-
-        # Detecta linhas
-        vertical_lines   = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel)
+        vertical_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel)
         horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel)
-        all_lines        = cv2.bitwise_or(vertical_lines, horizontal_lines)
-
-        # Remove linhas e limpa ruídos
+        all_lines = cv2.bitwise_or(vertical_lines, horizontal_lines)
         fingerprints_only = cv2.bitwise_and(thresh, cv2.bitwise_not(all_lines))
-        kernel_small      = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        cleaned           = cv2.morphologyEx(fingerprints_only, cv2.MORPH_OPEN, kernel_small)
-
-        # Dilata para realçar cristas
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        cleaned = cv2.morphologyEx(fingerprints_only, cv2.MORPH_OPEN, kernel_small)
         kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        filtered      = cv2.dilate(cleaned, kernel_dilate, iterations=1)
-
+        filtered = cv2.dilate(cleaned, kernel_dilate, iterations=1)
         return filtered
+
+    def process_and_save_crop(col_img_gray, box, person_id, finger_index, crops_dir, masks_dir):
+        """Processes and saves a single cropped fingerprint and its mask."""
+        x1, y1, x2, y2 = box
+        output_filename = f"{person_id}_dedo{finger_index}.bmp"
+        
+        cropped_finger = col_img_gray[y1:y2, x1:x2]
+        cropped_finger = cv2.rotate(cropped_finger, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        mask = remove_lines_keep_fingerprints(cropped_finger)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+        mask = cv2.dilate(closed, k, iterations=1)
+
+        crop_path = os.path.join(crops_dir, output_filename)
+        mask_path = os.path.join(masks_dir, output_filename.replace(".bmp", ".png"))
+        
+        save_crop_500dpi(cropped_finger, crop_path)
+        _imwrite_unicode(mask_path, mask)
+
+        return {
+            "filename": output_filename, "is_single": True,
+            "box_x1": x1, "box_y1": y1, "box_x2": x2, "box_y2": y2,
+        }
 
     # --- Main Logic ---
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -174,56 +179,43 @@ def segment_columns_with_ml(column_paths, model_path, crops_dir, masks_dir, batc
     model.to(device)
     model.eval()
 
-    segmentation_results = []
+    all_results = []
+    tasks = []
 
-    for batch_paths in tqdm(create_batches(column_paths, batch_size), total=-(-len(column_paths) // batch_size), desc="Stage 1: ML Segmentation"):
-        images_tensors = []
-        original_column_images = []
-        for path in batch_paths:
-            with open(path, 'rb') as f:
-                img_np = np.frombuffer(f.read(), np.uint8)
-                col_img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
-            images_tensors.append(F.to_tensor(cv2.cvtColor(col_img, cv2.COLOR_BGR2RGB)).to(device))
-            original_column_images.append(col_img)
+    with ThreadPoolExecutor() as executor:
+        for batch_paths in tqdm(create_batches(column_paths, batch_size), total=-(-len(column_paths) // batch_size), desc="Stage 1: ML Segmentation"):
+            images_tensors = []
+            original_column_images = []
+            for path in batch_paths:
+                with open(path, 'rb') as f:
+                    img_np = np.frombuffer(f.read(), np.uint8)
+                    col_img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+                images_tensors.append(F.to_tensor(cv2.cvtColor(col_img, cv2.COLOR_BGR2RGB)).to(device))
+                original_column_images.append(col_img)
 
-        with torch.no_grad():
-            predictions = model(images_tensors)
+            with torch.no_grad():
+                predictions = model(images_tensors)
 
-        for i, pred in enumerate(predictions):
-            col_path = batch_paths[i]
-            col_img = original_column_images[i]
-            col_filename = os.path.basename(col_path)
-            person_id, hand = col_filename.replace("column_", "").replace(".png", "").split('_')
-            
-            boxes = pred['boxes'][pred['scores'] > threshold].detach().cpu().numpy().astype(int)
-            boxes = sorted(boxes, key=lambda b: b[1])
-
-            finger_num_start = 1 if hand == "hand1" else 6
-            for j, box in enumerate(boxes):
-                x1, y1, x2, y2 = box
-                finger_index = finger_num_start + j
+            for i, pred in enumerate(predictions):
+                col_path = batch_paths[i]
+                col_img = original_column_images[i]
+                col_filename = os.path.basename(col_path)
+                person_id, hand = col_filename.replace("column_", "").replace(".png", "").split('_')
                 
-                output_filename = f"{person_id}_dedo{finger_index}.bmp"
-                
+                boxes = pred['boxes'][pred['scores'] > threshold].detach().cpu().numpy().astype(int)
+                boxes = sorted(boxes, key=lambda b: b[1])
+
+                finger_num_start = 1 if hand == "hand1" else 6
                 gray_col = cv2.cvtColor(col_img, cv2.COLOR_BGR2GRAY)
-                cropped_finger = gray_col[y1:y2, x1:x2]
-                cropped_finger = cv2.rotate(cropped_finger, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                
-                mask = remove_lines_keep_fingerprints(cropped_finger)
-                # 2) Limpeza morfológica e rotulagem de componentes
-                k       = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-                closed  = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-                mask = cv2.dilate(closed, k, iterations=1)
 
-                crop_path = os.path.join(crops_dir, output_filename)
-                mask_path = os.path.join(masks_dir, output_filename.replace(".bmp", ".png"))
-                save_crop_500dpi(cropped_finger, crop_path)
-                _imwrite_unicode(mask_path, mask)
+                for j, box in enumerate(boxes):
+                    finger_index = finger_num_start + j
+                    # Submit task to the thread pool
+                    future = executor.submit(process_and_save_crop, gray_col, box, person_id, finger_index, crops_dir, masks_dir)
+                    tasks.append(future)
+        
+        # Collect results as they complete
+        for future in tqdm(as_completed(tasks), total=len(tasks), desc="Saving crops and masks"):
+            all_results.append(future.result())
 
-                segmentation_results.append({
-                    "filename": output_filename,
-                    "is_single": True,
-                    "box_x1": x1, "box_y1": y1, "box_x2": x2, "box_y2": y2,
-                })
-
-    return pl.DataFrame(segmentation_results)
+    return pl.DataFrame(all_results)

@@ -1,6 +1,8 @@
 import os
 import glob
+import sys
 import subprocess
+import multiprocessing
 import polars as pl
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
@@ -18,16 +20,24 @@ from features.frequency import analyze_ridge_frequency
 
 # --- Configuration ---
 # Build paths relative to the project root to make the script runnable from anywhere
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-
-INPUT_DIR_CUTS = os.path.join(PROJECT_ROOT, "data/input/Ml_Sample")
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data/output")
+def get_project_root():                                                                              
+  """ Retorna o caminho raiz do projeto, seja rodando como script ou como executável. """              
+  if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+  else:                                                                                                 
+        # Se estiver rodando como um script normal                                                       
+        # A lógica original está correta.                                                                 
+        script_dir = os.path.dirname(os.path.abspath(__file__))                          
+        return os.path.dirname(script_dir)                          
+        
+PROJECT_ROOT = get_project_root()  
+INPUT_DIR_CUTS = os.path.join(PROJECT_ROOT, "data", "input", "Fingerprints")
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data", "output")
 COLUMN_DIR = os.path.join(OUTPUT_DIR, "merged_columns_from_pipeline")
 CROPS_DIR = os.path.join(OUTPUT_DIR, "crops")
 MASKS_DIR = os.path.join(OUTPUT_DIR, "masks")
-MODEL_PATH = os.path.join(PROJECT_ROOT, "bin/best_detector_model_v2.pth")
-NFIQ2_EXECUTABLE_PATH = os.path.join(PROJECT_ROOT, "bin/NFIQ2/bin/NFIQ2.exe")
+MODEL_PATH = os.path.join(PROJECT_ROOT, "bin", "best_detector_model_v2.pth")
+NFIQ2_EXECUTABLE_PATH = os.path.join(PROJECT_ROOT, "bin", "NFIQ2", "bin", "NFIQ2.exe")
 FINAL_RESULTS_CSV = os.path.join(OUTPUT_DIR, "full_analysis.csv")
 
 # --- Utility Functions ---
@@ -146,7 +156,15 @@ def run_stage_3_python_analysis(crop_paths: list[str], jvm_jars: list[str]):
         print("No cropped images found for Python analysis.")
         return pl.DataFrame()
     results = []
-    max_workers = min(os.cpu_count(), 4)
+    # Use half the available cores, capped at 8, to balance performance and memory for the JVM.
+    # When running as a frozen executable, be conservative with memory.
+    if getattr(sys, 'frozen', False):
+        max_workers = 2
+    else:
+        # In a normal script environment, we can use more cores.
+        max_workers = min(max(1, (os.cpu_count() or 1) // 2), 8)
+    print(f"Using {max_workers} workers for Python feature analysis.")
+
     with ProcessPoolExecutor(max_workers=max_workers, initializer=partial(start_jvm, jvm_jars)) as executor:
         future_to_path = {executor.submit(analyze_python_features, path): path for path in crop_paths}
         for future in tqdm(as_completed(future_to_path), total=len(crop_paths), desc="Stage 3: Python Analysis"):
@@ -199,4 +217,5 @@ def main():
     print(f"Processing complete. Final results saved to {FINAL_RESULTS_CSV}")
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

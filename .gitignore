@@ -22,3 +22,5 @@ key.env
 overleaf.txt
 # EXCEÇÃO: Arquivos .jar são importantes e DEVEM ser versionados
 !*.jar
+/backup
+/Data
