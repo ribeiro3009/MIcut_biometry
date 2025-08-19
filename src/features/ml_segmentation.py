@@ -8,6 +8,9 @@ from .merge_column import merge_and_rotate_fingerprints
 # --- Main Functions ---
 
 def create_columns_from_cuts(input_dir: str, output_dir: str) -> list:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm import tqdm
+
     os.makedirs(output_dir, exist_ok=True)
     all_image_paths = glob.glob(os.path.join(input_dir, "*.bmp"))
     images_by_id = defaultdict(list)
@@ -25,7 +28,7 @@ def create_columns_from_cuts(input_dir: str, output_dir: str) -> list:
         print(f"Error: No valid BMP images found in {input_dir}.")
         return []
 
-    created_column_paths = []
+    tasks = []
     for img_id, paths in images_by_id.items():
         try:
             paths.sort(key=lambda p: int(os.path.basename(p).split('_dedo')[1].split('.')[0]))
@@ -37,14 +40,23 @@ def create_columns_from_cuts(input_dir: str, output_dir: str) -> list:
         hand2_paths = [p for p in paths if int(os.path.basename(p).split('_dedo')[1].split('.')[0]) > 5]
 
         if hand1_paths:
-            output_path = process_and_save_hand(img_id, hand1_paths, "hand1", output_dir)
-            if output_path:
-                created_column_paths.append(output_path)
-
+            tasks.append((img_id, hand1_paths, "hand1", output_dir))
         if hand2_paths:
-            output_path = process_and_save_hand(img_id, hand2_paths, "hand2", output_dir)
-            if output_path:
-                created_column_paths.append(output_path)
+            tasks.append((img_id, hand2_paths, "hand2", output_dir))
+
+    created_column_paths = []
+    # Use a ThreadPoolExecutor to process hands in parallel (I/O-bound task)
+    max_workers = min(32, (os.cpu_count() or 1) * 4)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Using a lambda to unpack the tuple of arguments for the function
+        future_to_task = {executor.submit(lambda p: process_and_save_hand(*p), task): task for task in tasks}
+        
+        # Use tqdm to show progress for column creation
+        for future in tqdm(as_completed(future_to_task), total=len(tasks), desc="Creating column images"):
+            result_path = future.result()
+            if result_path:
+                created_column_paths.append(result_path)
                 
     return created_column_paths
 
