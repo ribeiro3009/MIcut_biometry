@@ -10,13 +10,19 @@ import cv2
 from PIL import Image
 import numpy as np
 from functools import partial
+import cbor2
+import jpype, jpype.imports
 
 # Import feature analysis functions
 from features.ml_segmentation import create_columns_from_cuts, segment_columns_with_ml
-from features.minutiae import analyze_minutiae_from_image, start_jvm
+#from features.minutiae import analyze_minutiae_from_image, start_jvm
+from features.minutiae import start_jvm, extract_fingerprint_template, detect_clusters_and_singularities
+
 from features.shape import analyze_shape
 from features.texture import analyze_texture
 from features.frequency import analyze_ridge_frequency
+
+from features.dfiqi import dfiqi_on_image, DFIQIParams
 
 # --- Configuration ---
 # Build paths relative to the project root to make the script runnable from anywhere
@@ -128,6 +134,43 @@ def _imread_unicode(path, flags):
         # This mimics cv2.imread behavior of returning None on failure
         return None
 
+
+# esse trecho do codigo tbm calcula as minucias, so que ele pega outros parametros do que minutiae.py, inclusive percebi diferença de resultados do DFIQI quando utiliza essa função e a reutilização da função do minutiae.py
+# outro problema de usar esse trecho do codigo , é ter q compilar duas vezes o SOURCEAFIS
+'''
+def _extract_minutiae_points_sourceafis(img_gray: np.ndarray, dpi: int = 500) -> list[tuple[float, float]]:
+    """
+    Gera o template (CBOR) via SourceAFIS e extrai coordenadas (x,y) das minúcias.
+    Usa variantes comuns do CBOR: positionsX/positionsY ou lista 'minutiae'.
+    """
+    # importa classes Java *após* a JVM estar iniciada no worker
+    from com.machinezoo.sourceafis import FingerprintImage, FingerprintImageOptions, FingerprintTemplate
+
+    if img_gray.ndim == 3 and img_gray.shape[2] == 3:
+        img_gray = cv2.cvtColor(img_gray, cv2.COLOR_BGR2GRAY)
+
+    pil = Image.fromarray(img_gray)
+    opts = FingerprintImageOptions().dpi(dpi)
+    fp_image = FingerprintImage(pil.width, pil.height, pil.tobytes(), opts)
+    template = FingerprintTemplate(fp_image).toByteArray()
+
+    data = cbor2.loads(bytes(template))
+    pts: list[tuple[float, float]] = []
+
+    if "positionsX" in data and "positionsY" in data:
+        xs = data.get("positionsX", [])
+        ys = data.get("positionsY", [])
+        pts = [(float(x), float(y)) for x, y in zip(xs, ys)]
+    elif "minutiae" in data and isinstance(data["minutiae"], list):
+        for mi in data["minutiae"]:
+            if not isinstance(mi, dict):
+                continue
+            x = mi.get("x", mi.get("positionX", mi.get("position", {}).get("x", 0.0)))
+            y = mi.get("y", mi.get("positionY", mi.get("position", {}).get("y", 0.0)))
+            pts.append((float(x), float(y)))
+
+    return pts
+
 def analyze_python_features(crop_path):
     try:
         filename = os.path.basename(crop_path)
@@ -138,17 +181,133 @@ def analyze_python_features(crop_path):
             roi_mask = (roi_mask > 0).astype(np.uint8)
 
         cropped_image = _imread_unicode(crop_path, cv2.IMREAD_GRAYSCALE)
-        if cropped_image is None: return {"filename": filename}
+        if cropped_image is None:
+            return {"filename": filename}
 
+        # --- Features já existentes ---
         minutiae_data = analyze_minutiae_from_image(cropped_image)
-        shape_data = analyze_shape(roi_mask)
-        texture_data = analyze_texture(cropped_image, roi_mask)
-        frequency_data = analyze_ridge_frequency(cropped_image, roi_mask)
+        shape_data    = analyze_shape(roi_mask)
+        texture_data  = analyze_texture(cropped_image, roi_mask)
+        frequency_data= analyze_ridge_frequency(cropped_image, roi_mask)
 
-        return {"filename": filename, **minutiae_data, **shape_data, **texture_data, **frequency_data}
+        # --- DFIQI: extrai minúcias (x,y) e calcula GQS/LQSsum ---
+        dfiqi_fields = {}
+        try:
+            features_xy = _extract_minutiae_points_sourceafis(cropped_image, dpi=500)
+            if features_xy:  # só roda DFIQI se houver pelo menos 1 feature
+                dfiqi_out = dfiqi_on_image(cropped_image, features_xy, DFIQIParams(dpi=500.0))
+                g = dfiqi_out["global"]
+                # Campos compactos para o DataFrame
+                dfiqi_fields = {
+                    "DFIQI_nFEAT":         g["nFEAT"],
+                    "DFIQI_LQSsum":        g["LQSsum"],
+                    "DFIQI_ValueGQS":      g["ValueGQS"],
+                    "DFIQI_ComplexityGQS": g["ComplexityGQS"],
+                    "DFIQI_DifficultyGQS": g["DifficultyGQS"],
+                }
+                # (Se quiser probabilidades detalhadas, você pode adicionar mais colunas aqui)
+        except Exception as e:
+            # Não derruba a pipeline se DFIQI falhar para um item
+            print(f"DFIQI failed for {filename}: {e}")
+
+        return {
+            "filename": filename,
+            **minutiae_data,
+            **shape_data,
+            **texture_data,
+            **frequency_data,
+            **dfiqi_fields,     # <--- NOVO: colunas DFIQI
+        }
     except Exception as e:
         print(f"Error in Python analysis for {os.path.basename(crop_path)}: {e}")
         return {"filename": os.path.basename(crop_path), "error": str(e)}
+
+'''
+
+def analyze_python_features(crop_path):
+    try:
+        filename = os.path.basename(crop_path)
+
+        # ROI mask
+        mask_path = os.path.join(MASKS_DIR, filename.replace(".bmp", ".png"))
+        roi_mask = _imread_unicode(mask_path, cv2.IMREAD_GRAYSCALE)
+        if roi_mask is not None:
+            roi_mask = (roi_mask > 0).astype(np.uint8)
+
+        # Imagem recortada
+        cropped_image = _imread_unicode(crop_path, cv2.IMREAD_GRAYSCALE)
+        if cropped_image is None:
+            return {"filename": filename}
+
+        # ------------------------------
+        # (A) Extrai o TEMPLATE uma única vez (SourceAFIS)
+        # ------------------------------
+        template_cbor = extract_fingerprint_template(cropped_image, dpi=500)
+
+        # (A1) Contagens/cluster/singularidades reaproveitando minutiae.py
+        minutiae_data = detect_clusters_and_singularities(template_cbor)
+
+        # (A2) Extrai (x,y) das minúcias a partir do CBOR (sem reexecutar SourceAFIS)
+        features_xy = []
+        try:
+            data = cbor2.loads(bytes(template_cbor))
+            xs = data.get("positionsX", [])
+            ys = data.get("positionsY", [])
+            if xs and ys:
+                features_xy = [(float(x), float(y)) for x, y in zip(xs, ys)]
+            elif isinstance(data.get("minutiae", None), list):
+                for mi in data["minutiae"]:
+                    if isinstance(mi, dict):
+                        x = mi.get("x", mi.get("positionX", mi.get("position", {}).get("x", 0.0)))
+                        y = mi.get("y", mi.get("positionY", mi.get("position", {}).get("y", 0.0)))
+                        features_xy.append((float(x), float(y)))
+        except Exception as e:
+            print(f"CBOR parse failed for {filename}: {e}")
+            features_xy = []
+
+        # ------------------------------
+        # (B) Demais features
+        # ------------------------------
+        shape_data     = analyze_shape(roi_mask)
+        texture_data   = analyze_texture(cropped_image, roi_mask)
+        frequency_data = analyze_ridge_frequency(cropped_image, roi_mask)
+
+        # ------------------------------
+        # (C) DFIQI usando as minúcias extraídas acima
+        
+        # se quiser retirar a parte do DFIQI
+        #'''
+
+        dfiqi_fields = {}
+        try:
+            if features_xy:
+                dfiqi_out = dfiqi_on_image(cropped_image, features_xy, DFIQIParams(dpi=500.0))
+                g = dfiqi_out["global"]
+                dfiqi_fields = {
+                    # "DFIQI_nFEAT": g["nFEAT"],            
+                    "DFIQI_LQSsum":        g["LQSsum"],
+                    "DFIQI_ValueGQS":      g["ValueGQS"],
+                    "DFIQI_ComplexityGQS": g["ComplexityGQS"],
+                    "DFIQI_DifficultyGQS": g["DifficultyGQS"],
+                }
+        except Exception as e:
+            print(f"DFIQI failed for {filename}: {e}")
+
+        return {
+            "filename": filename,
+            **minutiae_data,
+            **shape_data,
+            **texture_data,
+            **frequency_data,
+            **dfiqi_fields,
+        }
+    #'''
+
+    except Exception as e:
+        print(f"Error in Python analysis for {os.path.basename(crop_path)}: {e}")
+        return {"filename": os.path.basename(crop_path), "error": str(e)}
+
+
 
 def run_stage_3_python_analysis(crop_paths: list[str], jvm_jars: list[str]):
     print("--- Stage 3: Running Python-based Feature Analysis (Parallel) ---")
