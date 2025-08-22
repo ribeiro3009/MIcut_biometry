@@ -17,7 +17,8 @@ def start_jvm(jars_to_load: list[str]):
     if not _vm_started:
         if not jars_to_load:
             raise RuntimeError("Nenhum arquivo JAR fornecido para iniciar a JVM.")
-        jpype.startJVM(classpath=jars_to_load)
+        jvm_path ="C:\\Users\\lflma\\AppData\\Local\\JetBrains\\Installations\\ReSharperPlatformVs17_224b7884\\Bin.ExtSvc\\jbr\\bin\\server\\jvm.dll"
+        jpype.startJVM(jvm_path, classpath=jars_to_load)
         _vm_started = True
 
 # --- Lógica Central (adaptada de fingerprint_cluster_check.py) ---
