@@ -135,8 +135,8 @@ def _imread_unicode(path, flags):
         return None
 
 
-# esse trecho do codigo tbm calcula as minucias, so que ele pega outros parametros do que minutiae.py, inclusive percebi diferença de resultados do DFIQI quando utiliza essa função e a reutilização da função do minutiae.py
-# outro problema de usar esse trecho do codigo , é ter q compilar duas vezes o SOURCEAFIS
+# esse trecho do codigo tbm calcula as minucias, so que parece que ele pega outros parametros do que minutiae.py, inclusive percebi diferença de resultados do DFIQI quando utiliza essa função e a reutilização da função do minutiae.py
+
 '''
 def _extract_minutiae_points_sourceafis(img_gray: np.ndarray, dpi: int = 500) -> list[tuple[float, float]]:
     """
