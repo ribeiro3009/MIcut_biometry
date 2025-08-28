@@ -1,0 +1,11 @@
+# Ambiente virtual
+.venv/
+
+# Dados de entrada
+data/input/fingerprints/
+
+# Resultados de saída
+data/output/crops/
+data/output/masks/
+data/output/merged_columns_from_pipeline/
+data/output/deep_quality.csv
