@@ -23,7 +23,9 @@ public sealed class MIcutOrientationStdExtractor : IMIcutQualityExtractor
             using var gray = artifacts.NewGrayMat();
             using var mask = artifacts.NewMaskMat();
 
-            double stdDeg = ComputeBlockOrientationStdDegrees(gray, mask);
+            if (!TryComputeBlockOrientationStdDegrees(gray, mask, out double stdDeg))
+                return 0;
+
             int rawScore = (int)Math.Round(stdDeg * 10.0, MidpointRounding.AwayFromZero);
             rawScore = Math.Clamp(rawScore, 0, ScoreMaximo);
             return ScoreMaximo - rawScore;
@@ -35,8 +37,9 @@ public sealed class MIcutOrientationStdExtractor : IMIcutQualityExtractor
         }
     }
 
-    private static double ComputeBlockOrientationStdDegrees(Mat gray, Mat mask)
+    private static bool TryComputeBlockOrientationStdDegrees(Mat gray, Mat mask, out double stdDeg)
     {
+        stdDeg = 0.0;
         int H = gray.Rows;
         int W = gray.Cols;
         var angles = new List<double>();
@@ -80,7 +83,7 @@ public sealed class MIcutOrientationStdExtractor : IMIcutQualityExtractor
             }
         }
 
-        if (angles.Count == 0) return 0.0;
+        if (angles.Count == 0) return false;
 
         double cosSum = 0.0;
         double sinSum = 0.0;
@@ -97,6 +100,7 @@ public sealed class MIcutOrientationStdExtractor : IMIcutQualityExtractor
             ? Math.Sqrt(-2.0 * Math.Log(R))
             : Math.PI / Math.Sqrt(3.0);
 
-        return circStd * (180.0 / Math.PI);
+        stdDeg = circStd * (180.0 / Math.PI);
+        return true;
     }
 }
