@@ -24,3 +24,10 @@ overleaf.txt
 !*.jar
 backup/
 Data/
+
+# .NET build artifacts
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+.vs/
